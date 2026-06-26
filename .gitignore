@@ -1,0 +1,22 @@
+# Binaries
+/shadow-agent
+/cmd/shadow-agent/shadow-agent
+*.exe
+*.test
+*.out
+
+# Data / runtime
+/var/
+/data/
+config-*.json
+*.Caddyfile
+
+# Local config (keep config.example.json)
+/config.json
+/config.local.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

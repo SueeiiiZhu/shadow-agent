@@ -1,0 +1,8 @@
+{
+  "listen": ":8443",
+  "token": "change-me-to-a-long-random-per-agent-token",
+  "tlsCertFile": "",
+  "tlsKeyFile": "",
+  "kernelBinDir": "/usr/local/bin",
+  "dataDir": "/var/lib/shadow-agent"
+}
