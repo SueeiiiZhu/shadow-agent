@@ -119,8 +119,8 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid NodeSpec: " + err.Error()})
 		return
 	}
-	if spec.Tag == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tag is required"})
+	if !kernel.ValidTag(spec.Tag) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid tag: must be 1-64 chars of letters, digits, dot, underscore or hyphen"})
 		return
 	}
 	state, err := s.sup.Apply(spec)

@@ -5,7 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+// tagPattern restricts node tags to a filesystem-safe charset. The tag is used
+// verbatim to build the on-disk config filename (config-<tag>.<ext>), so a tag
+// carrying a path separator or "." traversal must never reach WriteFile. The
+// panel validates tags too, but the agent is a separate trust boundary and must
+// not rely on its caller.
+var tagPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// ValidTag reports whether tag is safe to embed in a filesystem path.
+func ValidTag(tag string) bool {
+	return tagPattern.MatchString(tag)
+}
 
 // Marshaler renders a NodeSpec into a kernel-specific config byte payload plus
 // the file extension to use on disk.
@@ -31,6 +44,9 @@ func Render(spec *NodeSpec) ([]byte, string, error) {
 // Generate renders the config for spec and writes it to dataDir/<kernel>/
 // config-<tag>.<ext>, returning the absolute config path.
 func Generate(spec *NodeSpec, dataDir string) (string, error) {
+	if !ValidTag(spec.Tag) {
+		return "", fmt.Errorf("invalid tag %q: must be 1-64 chars of letters, digits, dot, underscore or hyphen", spec.Tag)
+	}
 	data, ext, err := Render(spec)
 	if err != nil {
 		return "", err
