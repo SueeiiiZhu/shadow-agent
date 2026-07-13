@@ -63,7 +63,10 @@ func TestXraySocksUpstreamWithDialerChain(t *testing.T) {
 		},
 	}
 
-	outbounds, mainTag := buildXrayOutbounds(spec)
+	outbounds, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		t.Fatalf("buildXrayOutbounds: %v", err)
+	}
 	if mainTag != "proxy" {
 		t.Fatalf("main tag = %q, want proxy", mainTag)
 	}
@@ -111,7 +114,10 @@ func TestXraySocksUpstreamWithDialerChain(t *testing.T) {
 // TestXrayDefaultDirect verifies the default no-upstream case is freedom/direct.
 func TestXrayDefaultDirect(t *testing.T) {
 	spec := &NodeSpec{Tag: "t", Kernel: "xray", Protocol: "vless", Port: 443}
-	outbounds, mainTag := buildXrayOutbounds(spec)
+	outbounds, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		t.Fatalf("buildXrayOutbounds: %v", err)
+	}
 	if mainTag != "direct" {
 		t.Fatalf("mainTag = %q, want direct", mainTag)
 	}
@@ -134,7 +140,10 @@ func TestXrayChainOnly(t *testing.T) {
 			{Protocol: "socks", Address: "2.2.2.2", Port: 1080, Tag: "exit"},
 		},
 	}
-	outbounds, mainTag := buildXrayOutbounds(spec)
+	outbounds, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		t.Fatalf("buildXrayOutbounds: %v", err)
+	}
 	if mainTag != "edge" {
 		t.Fatalf("mainTag = %q, want edge", mainTag)
 	}
@@ -179,5 +188,65 @@ func TestXrayFullConfigMarshals(t *testing.T) {
 	r1 := rules[1].(map[string]any)
 	if r1["outboundTag"] != "proxy" {
 		t.Fatalf("node route outboundTag = %v, want proxy", r1["outboundTag"])
+	}
+}
+
+// TestXrayAutoTagChain verifies the auto-generated tag path: when hops omit
+// explicit tags, the main outbound dials through "dialer-1", which dials through
+// "dialer-2", and the last hop dials directly.
+func TestXrayAutoTagChain(t *testing.T) {
+	spec := &NodeSpec{
+		Tag: "t", Kernel: "xray", Protocol: "vless", Port: 443,
+		Outbound: &OutboundSpec{Protocol: "socks", Address: "1.1.1.1", Port: 1080}, // no Tag
+		Dialer: []OutboundSpec{
+			{Protocol: "socks", Address: "2.2.2.2", Port: 1080}, // no Tag -> dialer-1
+			{Protocol: "http", Address: "3.3.3.3", Port: 8080},  // no Tag -> dialer-2
+		},
+	}
+	outbounds, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		t.Fatalf("buildXrayOutbounds: %v", err)
+	}
+	if mainTag != "proxy" {
+		t.Fatalf("mainTag = %q, want proxy (default)", mainTag)
+	}
+	main := findOutbound(t, outbounds, "proxy")
+	if got := dialerProxyOf(t, main); got != "dialer-1" {
+		t.Fatalf("main dialerProxy = %q, want dialer-1", got)
+	}
+	d1 := findOutbound(t, outbounds, "dialer-1")
+	if got := dialerProxyOf(t, d1); got != "dialer-2" {
+		t.Fatalf("dialer-1 dialerProxy = %q, want dialer-2", got)
+	}
+	d2 := findOutbound(t, outbounds, "dialer-2")
+	if got := dialerProxyOf(t, d2); got != "" {
+		t.Fatalf("dialer-2 dialerProxy = %q, want empty (last hop direct)", got)
+	}
+}
+
+// TestXrayDuplicateTagRejected verifies that colliding outbound tags are
+// rejected rather than silently producing a broken config.
+func TestXrayDuplicateTagRejected(t *testing.T) {
+	spec := &NodeSpec{
+		Tag: "t", Kernel: "xray", Protocol: "vless", Port: 443,
+		Outbound: &OutboundSpec{Protocol: "socks", Address: "1.1.1.1", Port: 1080, Tag: "dup"},
+		Dialer: []OutboundSpec{
+			{Protocol: "socks", Address: "2.2.2.2", Port: 1080, Tag: "dup"},
+		},
+	}
+	if _, _, err := buildXrayOutbounds(spec); err == nil {
+		t.Fatalf("expected error for duplicate outbound tag, got nil")
+	}
+}
+
+// TestXrayDanglingDialerProxyRejected verifies that an explicit DialerProxyTag
+// pointing at no outbound is rejected.
+func TestXrayDanglingDialerProxyRejected(t *testing.T) {
+	spec := &NodeSpec{
+		Tag: "t", Kernel: "xray", Protocol: "vless", Port: 443,
+		Outbound: &OutboundSpec{Protocol: "socks", Address: "1.1.1.1", Port: 1080, Tag: "proxy", DialerProxyTag: "ghost"},
+	}
+	if _, _, err := buildXrayOutbounds(spec); err == nil {
+		t.Fatalf("expected error for dangling dialerProxy tag, got nil")
 	}
 }

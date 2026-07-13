@@ -64,7 +64,10 @@ func buildXrayConfig(spec *NodeSpec) (xrayConfig, error) {
 		return xrayConfig{}, err
 	}
 
-	outbounds, mainTag := buildXrayOutbounds(spec)
+	outbounds, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		return xrayConfig{}, err
+	}
 
 	cfg := xrayConfig{
 		Log: xrayLog{Loglevel: "warning"},
@@ -267,14 +270,16 @@ func buildXrayStreamSettings(s *StreamSpec) map[string]any {
 //   - dialer chain: main outbound dials through hop1; hop1 through hop2; ...;
 //     the last hop dials directly (freedom, no dialerProxy). Linkage is via
 //     streamSettings.sockopt.dialerProxy referencing the NEXT hop's tag.
-func buildXrayOutbounds(spec *NodeSpec) ([]any, string) {
+func buildXrayOutbounds(spec *NodeSpec) ([]any, string, error) {
 	// No upstream and no chain: plain direct.
 	if spec.Outbound == nil && len(spec.Dialer) == 0 {
 		direct := map[string]any{"protocol": "freedom", "tag": "direct"}
-		return []any{direct}, "direct"
+		return []any{direct}, "direct", nil
 	}
 
 	outbounds := make([]any, 0, len(spec.Dialer)+2)
+	tags := make([]string, 0, len(spec.Dialer)+1)  // every generated outbound tag
+	refs := make([]string, 0, len(spec.Dialer)+1)  // every dialerProxy reference
 
 	// Determine the main outbound spec. If Outbound is provided we use it,
 	// otherwise the first dialer hop acts as the main outbound.
@@ -300,8 +305,11 @@ func buildXrayOutbounds(spec *NodeSpec) ([]any, string) {
 		mainDialerProxy = chainTag(chain, 0)
 	}
 
-	main := buildXrayOutbound(mainSpec, mainDialerProxy)
-	outbounds = append(outbounds, main)
+	outbounds = append(outbounds, buildXrayOutbound(mainSpec, mainDialerProxy))
+	tags = append(tags, mainSpec.Tag)
+	if mainDialerProxy != "" {
+		refs = append(refs, mainDialerProxy)
+	}
 
 	// Append chain hops; each hop dials through the next hop's tag, the last
 	// hop dials directly.
@@ -315,9 +323,33 @@ func buildXrayOutbounds(spec *NodeSpec) ([]any, string) {
 			dialerProxy = chainTag(chain, i+1)
 		}
 		outbounds = append(outbounds, buildXrayOutbound(hop, dialerProxy))
+		tags = append(tags, hop.Tag)
+		if dialerProxy != "" {
+			refs = append(refs, dialerProxy)
+		}
 	}
 
-	return outbounds, mainTag
+	// Validate tag uniqueness: duplicate outbound tags make Xray reject the
+	// config and silently collapse dialer-proxy links.
+	seen := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		if t == "" {
+			return nil, "", fmt.Errorf("xray: outbound with empty tag")
+		}
+		if seen[t] {
+			return nil, "", fmt.Errorf("xray: duplicate outbound tag %q", t)
+		}
+		seen[t] = true
+	}
+	// Validate every dialerProxy reference points at a real outbound; an
+	// explicit-but-dangling DialerProxyTag would orphan a hop.
+	for _, r := range refs {
+		if !seen[r] {
+			return nil, "", fmt.Errorf("xray: dialerProxy tag %q references no outbound", r)
+		}
+	}
+
+	return outbounds, mainTag, nil
 }
 
 // chainTag returns the effective tag for chain hop i, honoring an explicit Tag

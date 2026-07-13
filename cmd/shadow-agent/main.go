@@ -41,6 +41,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// shutdownDone is closed once the shutdown sequence (HTTP drain + kernel
+	// child termination) has fully completed, so main() can wait for it and not
+	// exit while kernel processes are still being killed.
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		log.Println("shadow-agent: shutting down")
@@ -48,6 +52,7 @@ func main() {
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
 		sup.Shutdown()
+		close(shutdownDone)
 	}()
 
 	if cfg.Token == "" {
@@ -58,7 +63,13 @@ func main() {
 	// Certificates are embedded in the server's TLSConfig, so pass empty paths.
 	err = httpSrv.ListenAndServeTLS("", "")
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Startup/serve failure that is not a graceful close: the shutdown
+		// goroutine is still parked on ctx.Done(), so tear down kernels directly.
 		log.Printf("shadow-agent: server error: %v", err)
+		sup.Shutdown()
 		os.Exit(1)
 	}
+	// Graceful close: wait for the shutdown goroutine to finish killing kernels
+	// before returning, so no child process is orphaned.
+	<-shutdownDone
 }

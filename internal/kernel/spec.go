@@ -3,12 +3,17 @@
 // (shadow-panel) so that NodeSpec round-trips losslessly over the REST API.
 package kernel
 
-// UserSpec is a single account provisioned on a node.
+// UserSpec is a single account provisioned on a node. SpeedLimitMbps and
+// IPLimit are carried for forward compatibility; plain Xray/Hysteria2 have no
+// native per-user bandwidth/IP cap, so they are currently informational (see
+// docs) rather than enforced by the kernel.
 type UserSpec struct {
-	ID       string `json:"id"`
-	Password string `json:"password"`
-	Email    string `json:"email"`
-	Level    int    `json:"level"`
+	ID             string `json:"id"`
+	Password       string `json:"password"`
+	Email          string `json:"email"`
+	Level          int    `json:"level"`
+	SpeedLimitMbps int    `json:"speedLimitMbps,omitempty"`
+	IPLimit        int    `json:"ipLimit,omitempty"`
 }
 
 // TLSSpec describes TLS settings for a stream.

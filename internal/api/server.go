@@ -159,16 +159,53 @@ func (s *Server) handleNodeState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
+// trafficEntry is one node's traffic delta since the previous pull, including a
+// per-user breakdown. It mirrors the panel's agentclient.TrafficEntry.
+type trafficEntry struct {
+	Tag           string        `json:"tag"`
+	UplinkBytes   int64         `json:"uplinkBytes"`
+	DownlinkBytes int64         `json:"downlinkBytes"`
+	Users         []userTraffic `json:"users,omitempty"`
+}
+
+// userTraffic is a single user's traffic delta on a node, keyed by email.
+type userTraffic struct {
+	Email         string `json:"email"`
+	UplinkBytes   int64  `json:"uplinkBytes"`
+	DownlinkBytes int64  `json:"downlinkBytes"`
+}
+
 func (s *Server) handleTraffic(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.collectTraffic())
+}
+
+// collectTraffic samples each node's Xray stats API once and returns per-node
+// and per-user byte deltas since the previous pull. Nodes whose kernel exposes
+// no reachable stats source contribute a zero entry (honest no-data), not a
+// fabricated count.
+func (s *Server) collectTraffic() []trafficEntry {
 	specs := s.sup.Specs()
-	tags := make([]string, 0, len(specs))
+	out := make([]trafficEntry, 0, len(specs))
 	for _, sp := range specs {
-		tags = append(tags, sp.Tag)
+		entry := trafficEntry{Tag: sp.Tag}
+		stats, ok := s.sup.XrayStats(sp.Tag)
+		if ok {
+			up := stats["inbound>>>"+sp.Tag+">>>traffic>>>uplink"]
+			down := stats["inbound>>>"+sp.Tag+">>>traffic>>>downlink"]
+			entry.UplinkBytes, entry.DownlinkBytes = s.traffic.Delta(traffic.NodeKey(sp.Tag), up, down)
+			for _, u := range sp.Users {
+				if u.Email == "" {
+					continue
+				}
+				uUp := stats["user>>>"+u.Email+">>>traffic>>>uplink"]
+				uDown := stats["user>>>"+u.Email+">>>traffic>>>downlink"]
+				dUp, dDown := s.traffic.Delta(traffic.UserKey(sp.Tag, u.Email), uUp, uDown)
+				entry.Users = append(entry.Users, userTraffic{Email: u.Email, UplinkBytes: dUp, DownlinkBytes: dDown})
+			}
+		}
+		out = append(out, entry)
 	}
-	// No kernel stats source wired in this environment: sampler reports no data,
-	// yielding zero deltas per contract.
-	stats := s.traffic.Collect(tags, func(string) (int64, int64, bool) { return 0, 0, false })
-	writeJSON(w, http.StatusOK, stats)
+	return out
 }
 
 // serverState is the /server/state response body.
