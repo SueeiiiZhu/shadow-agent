@@ -38,6 +38,11 @@ func Render(spec *NodeSpec) ([]byte, string, error) {
 	if !ok {
 		return nil, "", fmt.Errorf("unknown kernel %q", spec.Kernel)
 	}
+	if spec.OutboundGroup != nil && spec.Kernel != "xray" {
+		// Refuse instead of silently dropping the group (traffic would leave
+		// through the server's own IP).
+		return nil, "", fmt.Errorf("outboundGroup is only supported by the xray kernel")
+	}
 	return m(spec)
 }
 

@@ -94,6 +94,18 @@ type NodeSpec struct {
 	Stream   *StreamSpec    `json:"stream,omitempty"`
 	Outbound *OutboundSpec  `json:"outbound,omitempty"` // nil => freedom direct
 	Dialer   []OutboundSpec `json:"dialerChain,omitempty"`
+	// OutboundGroup spreads egress across several upstreams (xray only); it is
+	// mutually exclusive with Outbound.
+	OutboundGroup *OutboundGroup `json:"outboundGroup,omitempty"`
+}
+
+// OutboundGroup is a pool of equivalent upstreams that connections are spread
+// across. Every member is dialed through the node's dialer chain, if any.
+type OutboundGroup struct {
+	Strategy string         `json:"strategy"` // random|roundRobin|leastPing
+	Members  []OutboundSpec `json:"members"`
+	ProbeURL string         `json:"probeUrl"`      // health-check URL, default https://www.gstatic.com/generate_204
+	ProbeInt string         `json:"probeInterval"` // e.g. "1m"
 }
 
 // NodeState is the runtime status of a node as reported back to the panel.

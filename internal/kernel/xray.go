@@ -15,6 +15,8 @@ type xrayConfig struct {
 	Inbounds  []any          `json:"inbounds"`
 	Outbounds []any          `json:"outbounds"`
 	Routing   xrayRouting    `json:"routing"`
+	// Observatory health-checks the pool members so dead upstreams are skipped.
+	Observatory map[string]any `json:"observatory,omitempty"`
 }
 
 type xrayLog struct {
@@ -46,12 +48,14 @@ type xraySystemPolicy struct {
 type xrayRouting struct {
 	DomainStrategy string          `json:"domainStrategy"`
 	Rules          []xrayRouteRule `json:"rules"`
+	Balancers      []any           `json:"balancers,omitempty"`
 }
 
 type xrayRouteRule struct {
 	Type        string   `json:"type"`
 	InboundTag  []string `json:"inboundTag,omitempty"`
-	OutboundTag string   `json:"outboundTag"`
+	OutboundTag string   `json:"outboundTag,omitempty"`
+	BalancerTag string   `json:"balancerTag,omitempty"`
 }
 
 // buildXrayConfig produces the full Xray config object for a NodeSpec. This is
@@ -68,6 +72,14 @@ func buildXrayConfig(spec *NodeSpec) (xrayConfig, error) {
 	outbounds, mainTag, err := buildXrayOutbounds(spec)
 	if err != nil {
 		return xrayConfig{}, err
+	}
+	// Pool egress: route the business inbound to a balancer over the members.
+	var balancers []any
+	var observatory map[string]any
+	userRule := xrayRouteRule{Type: "field", InboundTag: []string{spec.Tag}, OutboundTag: mainTag}
+	if spec.OutboundGroup != nil {
+		balancers, observatory = buildXrayBalancer(spec.OutboundGroup)
+		userRule = xrayRouteRule{Type: "field", InboundTag: []string{spec.Tag}, BalancerTag: poolBalancerTag}
 	}
 
 	cfg := xrayConfig{
@@ -94,9 +106,11 @@ func buildXrayConfig(spec *NodeSpec) (xrayConfig, error) {
 			DomainStrategy: "AsIs",
 			Rules: []xrayRouteRule{
 				{Type: "field", InboundTag: []string{"api"}, OutboundTag: "api"},
-				{Type: "field", InboundTag: []string{spec.Tag}, OutboundTag: mainTag},
+				userRule,
 			},
+			Balancers: balancers,
 		},
+		Observatory: observatory,
 	}
 	return cfg, nil
 }
@@ -298,6 +312,9 @@ func GRPCServiceName(s *StreamSpec) string {
 //     the last hop dials directly (freedom, no dialerProxy). Linkage is via
 //     streamSettings.sockopt.dialerProxy referencing the NEXT hop's tag.
 func buildXrayOutbounds(spec *NodeSpec) ([]any, string, error) {
+	if spec.OutboundGroup != nil {
+		return buildXrayPoolOutbounds(spec)
+	}
 	// No upstream and no chain: plain direct.
 	if spec.Outbound == nil && len(spec.Dialer) == 0 {
 		direct := map[string]any{"protocol": "freedom", "tag": "direct"}
@@ -305,8 +322,8 @@ func buildXrayOutbounds(spec *NodeSpec) ([]any, string, error) {
 	}
 
 	outbounds := make([]any, 0, len(spec.Dialer)+2)
-	tags := make([]string, 0, len(spec.Dialer)+1)  // every generated outbound tag
-	refs := make([]string, 0, len(spec.Dialer)+1)  // every dialerProxy reference
+	tags := make([]string, 0, len(spec.Dialer)+1) // every generated outbound tag
+	refs := make([]string, 0, len(spec.Dialer)+1) // every dialerProxy reference
 
 	// Determine the main outbound spec. If Outbound is provided we use it,
 	// otherwise the first dialer hop acts as the main outbound.
@@ -521,4 +538,92 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+const (
+	poolBalancerTag = "upstream-pool"
+	poolMemberTag   = "pool-" // observatory/balancer selector prefix
+)
+
+// buildXrayPoolOutbounds renders every group member as its own outbound
+// (pool-1..pool-N), all dialed through the node's dialer chain, plus the chain
+// hops themselves. The returned main tag is unused for pools (the routing rule
+// targets the balancer instead).
+func buildXrayPoolOutbounds(spec *NodeSpec) ([]any, string, error) {
+	g := spec.OutboundGroup
+	if spec.Outbound != nil {
+		return nil, "", fmt.Errorf("xray: outbound and outboundGroup are mutually exclusive")
+	}
+	if len(g.Members) == 0 {
+		return nil, "", fmt.Errorf("xray: outboundGroup has no members")
+	}
+	switch g.Strategy {
+	case "", "random", "roundRobin", "leastPing":
+	default:
+		return nil, "", fmt.Errorf("xray: unknown outboundGroup strategy %q", g.Strategy)
+	}
+	chain := spec.Dialer
+	first := ""
+	if len(chain) > 0 {
+		first = chainTag(chain, 0)
+	}
+	outbounds := make([]any, 0, len(g.Members)+len(chain))
+	tags := map[string]bool{}
+	for i, m := range g.Members {
+		m.Tag = fmt.Sprintf("%s%d", poolMemberTag, i+1)
+		outbounds = append(outbounds, buildXrayOutbound(m, first))
+		tags[m.Tag] = true
+	}
+	for i := range chain {
+		hop := chain[i]
+		if hop.Tag == "" {
+			hop.Tag = chainTag(chain, i)
+		}
+		if tags[hop.Tag] {
+			return nil, "", fmt.Errorf("xray: duplicate outbound tag %q", hop.Tag)
+		}
+		tags[hop.Tag] = true
+		dp := hop.DialerProxyTag
+		if dp == "" && i+1 < len(chain) {
+			dp = chainTag(chain, i+1)
+		}
+		outbounds = append(outbounds, buildXrayOutbound(hop, dp))
+	}
+	return outbounds, poolBalancerTag, nil
+}
+
+// buildXrayBalancer returns the routing balancers and the observatory config
+// for a pool. The observatory probes each member so a dead upstream is skipped.
+func buildXrayBalancer(g *OutboundGroup) (balancers []any, observatory map[string]any) {
+	strategy := g.Strategy
+	if strategy == "" {
+		strategy = "random"
+	}
+	strat := map[string]any{"type": strategy}
+	if strategy == "random" {
+		// xray's plain "random"/"roundRobin" ignore the observatory and keep
+		// sending traffic to dead members. leastLoad with expected == pool size
+		// picks randomly among the members that pass the health probe instead.
+		strat = map[string]any{"type": "leastLoad", "settings": map[string]any{
+			"expected": len(g.Members), "maxRTT": "5s", "tolerance": 0.01}}
+	}
+	bal := map[string]any{
+		"tag":      poolBalancerTag,
+		"selector": []string{poolMemberTag},
+		"strategy": strat,
+	}
+	probe := g.ProbeURL
+	if probe == "" {
+		probe = "https://www.gstatic.com/generate_204"
+	}
+	interval := g.ProbeInt
+	if interval == "" {
+		interval = "1m"
+	}
+	observatory = map[string]any{
+		"subjectSelector": []string{poolMemberTag},
+		"probeUrl":        probe,
+		"probeInterval":   interval,
+	}
+	return []any{bal}, observatory
 }

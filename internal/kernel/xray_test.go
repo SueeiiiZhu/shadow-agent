@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -323,5 +324,90 @@ func TestXrayNodeHopStream(t *testing.T) {
 	}
 	if _, err := json.Marshal(obs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestXrayOutboundGroup(t *testing.T) {
+	spec := &NodeSpec{Tag: "a", Kernel: "xray", Protocol: "vless", Port: 2055,
+		OutboundGroup: &OutboundGroup{Strategy: "roundRobin", Members: []OutboundSpec{
+			{Protocol: "socks", Address: "1.1.1.1", Port: 1080},
+			{Protocol: "socks", Address: "2.2.2.2", Port: 1080, User: "u", Pass: "p"},
+		}},
+		Dialer: []OutboundSpec{{Protocol: "socks", Address: "9.9.9.9", Port: 1}},
+	}
+	cfg, err := buildXrayConfig(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(cfg)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	obs := m["outbounds"].([]any)
+	if len(obs) != 3 {
+		t.Fatalf("want 2 members + 1 hop, got %d", len(obs))
+	}
+	for _, tag := range []string{"pool-1", "pool-2"} {
+		if dialerProxyOf(t, findOutbound(t, obs, tag)) != "dialer-1" {
+			t.Errorf("%s must dial through the chain", tag)
+		}
+	}
+	rules := m["routing"].(map[string]any)["rules"].([]any)
+	last := rules[len(rules)-1].(map[string]any)
+	if last["balancerTag"] != "upstream-pool" || last["outboundTag"] != nil {
+		t.Fatalf("user rule must target the balancer: %v", last)
+	}
+	bal := m["routing"].(map[string]any)["balancers"].([]any)[0].(map[string]any)
+	if bal["strategy"].(map[string]any)["type"] != "roundRobin" || bal["selector"].([]any)[0] != "pool-" {
+		t.Fatalf("balancer = %v", bal)
+	}
+	if m["observatory"].(map[string]any)["probeUrl"] == "" {
+		t.Fatal("observatory missing")
+	}
+
+	// Non-pool nodes must not grow balancers/observatory.
+	plain, _ := json.Marshal(mustCfg(t, &NodeSpec{Tag: "p", Kernel: "xray", Protocol: "vless", Port: 1}))
+	if strings.Contains(string(plain), "balancers") || strings.Contains(string(plain), "observatory") {
+		t.Fatal("plain node must not carry pool config")
+	}
+	for name, bad := range map[string]*NodeSpec{
+		"empty":    {Tag: "a", Kernel: "xray", Protocol: "vless", Port: 1, OutboundGroup: &OutboundGroup{}},
+		"strategy": {Tag: "a", Kernel: "xray", Protocol: "vless", Port: 1, OutboundGroup: &OutboundGroup{Strategy: "x", Members: []OutboundSpec{{Protocol: "socks", Address: "a", Port: 1}}}},
+		"both":     {Tag: "a", Kernel: "xray", Protocol: "vless", Port: 1, Outbound: &OutboundSpec{Protocol: "socks", Address: "a", Port: 1}, OutboundGroup: &OutboundGroup{Members: []OutboundSpec{{Protocol: "socks", Address: "a", Port: 1}}}},
+	} {
+		if _, err := buildXrayConfig(bad); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+	nonX := &NodeSpec{Tag: "s", Kernel: "singbox", Protocol: "vless", Port: 1, OutboundGroup: &OutboundGroup{Members: []OutboundSpec{{Protocol: "socks", Address: "a", Port: 1}}}}
+	if _, _, err := Render(nonX); err == nil {
+		t.Error("group on a non-xray kernel must be rejected")
+	}
+}
+
+func mustCfg(t *testing.T, s *NodeSpec) xrayConfig {
+	t.Helper()
+	c, err := buildXrayConfig(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestXrayRandomPoolIsHealthAware(t *testing.T) {
+	cfg := mustCfg(t, &NodeSpec{Tag: "a", Kernel: "xray", Protocol: "vless", Port: 1, OutboundGroup: &OutboundGroup{
+		Strategy: "random", Members: []OutboundSpec{{Protocol: "socks", Address: "a", Port: 1}, {Protocol: "socks", Address: "b", Port: 1}}}})
+	if len(cfg.Routing.Balancers) != 1 {
+		t.Fatalf("want 1 balancer, got %d", len(cfg.Routing.Balancers))
+	}
+	raw, _ := json.Marshal(cfg.Routing.Balancers[0])
+	var bal struct {
+		Strategy struct {
+			Type     string
+			Settings struct{ Expected int }
+		}
+	}
+	_ = json.Unmarshal(raw, &bal)
+	if bal.Strategy.Type != "leastLoad" || bal.Strategy.Settings.Expected != 2 {
+		t.Fatalf("random must render as health-aware leastLoad with expected=pool size: %s", raw)
 	}
 }
