@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"fmt"
+	"strings"
 )
 
 // xrayConfig is the top-level Xray config object. We model it with ordered,
@@ -257,9 +258,26 @@ func buildXrayStreamSettings(s *StreamSpec) map[string]any {
 		}
 		ss["wsSettings"] = ws
 	case "grpc":
-		ss["grpcSettings"] = map[string]any{"serviceName": "gun"}
+		// The spec reuses WS.Path as the gRPC serviceName and WS.Host as the
+		// :authority; the panel's share links mirror this (see GRPCServiceName).
+		grpc := map[string]any{"serviceName": GRPCServiceName(s)}
+		if s.WS != nil && s.WS.Host != "" {
+			grpc["authority"] = s.WS.Host
+		}
+		ss["grpcSettings"] = grpc
 	}
 	return ss
+}
+
+// GRPCServiceName returns the gRPC serviceName for a stream: WS.Path without a
+// leading slash, or "gun" when unset.
+func GRPCServiceName(s *StreamSpec) string {
+	if s != nil && s.WS != nil {
+		if n := strings.TrimPrefix(s.WS.Path, "/"); n != "" {
+			return n
+		}
+	}
+	return "gun"
 }
 
 // buildXrayOutbounds is THE CRUX. It generates the outbounds array and returns

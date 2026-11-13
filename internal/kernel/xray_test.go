@@ -250,3 +250,28 @@ func TestXrayDanglingDialerProxyRejected(t *testing.T) {
 		t.Fatalf("expected error for dangling dialerProxy tag, got nil")
 	}
 }
+
+func TestXrayGRPCServiceNameFromSpec(t *testing.T) {
+	cases := []struct {
+		path, host, want, wantAuth string
+	}{
+		{"", "", "gun", ""},
+		{"/myservice", "", "myservice", ""},
+		{"svc", "cdn.example.com", "svc", "cdn.example.com"},
+	}
+	for _, c := range cases {
+		ss := buildXrayStreamSettings(&StreamSpec{Network: "grpc", WS: &WSSpec{Path: c.path, Host: c.host}})
+		g := ss["grpcSettings"].(map[string]any)
+		if g["serviceName"] != c.want {
+			t.Errorf("path %q: serviceName %v, want %s", c.path, g["serviceName"], c.want)
+		}
+		if a, _ := g["authority"].(string); a != c.wantAuth {
+			t.Errorf("host %q: authority %q, want %q", c.host, a, c.wantAuth)
+		}
+	}
+	// nil WS block still yields the default.
+	ss := buildXrayStreamSettings(&StreamSpec{Network: "grpc"})
+	if ss["grpcSettings"].(map[string]any)["serviceName"] != "gun" {
+		t.Error("default serviceName must be gun")
+	}
+}
