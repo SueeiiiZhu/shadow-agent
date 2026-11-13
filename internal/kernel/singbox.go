@@ -67,6 +67,13 @@ func singboxInbound(spec *NodeSpec) (map[string]any, error) {
 			users = append(users, map[string]any{"name": u.Email, "password": u.Password})
 		}
 		base["users"] = users
+	case "socks", "http":
+		base["type"] = spec.Protocol
+		users := make([]map[string]any, 0, len(spec.Users))
+		for _, a := range proxyAccounts(spec.Users) {
+			users = append(users, map[string]any{"username": a.User, "password": a.Pass})
+		}
+		base["users"] = users
 	case "hysteria2":
 		base["type"] = "hysteria2"
 		users := make([]map[string]any, 0, len(spec.Users))

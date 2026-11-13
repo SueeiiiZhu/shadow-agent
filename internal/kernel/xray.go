@@ -196,6 +196,15 @@ func buildXrayInboundSettings(spec *NodeSpec) (map[string]any, error) {
 			"clients":  clients,
 			"network":  "tcp,udp",
 		}, nil
+	case "socks", "http":
+		accts := make([]map[string]any, 0, len(spec.Users))
+		for _, a := range proxyAccounts(spec.Users) {
+			accts = append(accts, map[string]any{"user": a.User, "pass": a.Pass})
+		}
+		if spec.Protocol == "socks" {
+			return map[string]any{"auth": "password", "accounts": accts, "udp": false}, nil
+		}
+		return map[string]any{"accounts": accts, "allowTransparent": false}, nil
 	default:
 		return nil, fmt.Errorf("xray: unsupported inbound protocol %q", spec.Protocol)
 	}
