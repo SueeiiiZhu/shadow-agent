@@ -65,3 +65,32 @@ func TestTLSCertificateFallback(t *testing.T) {
 		t.Fatalf("fallback produced empty cert")
 	}
 }
+
+func TestTLSCertificatePersistedAcrossCalls(t *testing.T) {
+	cfg := AgentConfig{DataDir: t.TempDir()}
+	c1, err := cfg.TLSCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := cfg.TLSCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(c1.Certificate[0]) != string(c2.Certificate[0]) {
+		t.Fatal("certificate changed between calls; TOFU pin would break on restart")
+	}
+	if fi, err := os.Stat(filepath.Join(cfg.DataDir, persistedKeyName)); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file missing or wrong mode: %v %v", fi, err)
+	}
+}
+
+func TestTLSCertificateFallsBackWhenDataDirUnwritable(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := AgentConfig{DataDir: filepath.Join(f, "sub")} // parent is a file -> MkdirAll fails
+	if _, err := cfg.TLSCertificate(); err != nil {
+		t.Fatalf("should fall back to ephemeral cert, got %v", err)
+	}
+}

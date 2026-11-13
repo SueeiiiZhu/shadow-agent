@@ -1,6 +1,6 @@
 // Package config loads the shadow-agent runtime configuration from a JSON file
-// with environment-variable overrides, and provides a self-signed in-memory TLS
-// certificate fallback so the agent can always serve HTTPS.
+// with environment-variable overrides, and provides a self-signed TLS
+// certificate (persisted under DataDir) so the agent can always serve HTTPS.
 package config
 
 import (
@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -93,27 +95,72 @@ func (cfg *AgentConfig) normalize() {
 	}
 }
 
+// Names of the self-signed certificate persisted under DataDir.
+const (
+	persistedCertName = "agent-tls.crt"
+	persistedKeyName  = "agent-tls.key"
+)
+
 // TLSCertificate returns the certificate to serve. If both cert and key files
-// are configured it loads them from disk; otherwise it generates a self-signed
-// in-memory certificate so HTTPS always works.
+// are configured it loads them from disk. Otherwise it uses a self-signed
+// certificate persisted under DataDir (generated on first start), so the
+// certificate fingerprint the panel pinned (TOFU) survives agent restarts.
+// If DataDir is unusable it falls back to an ephemeral in-memory certificate.
 func (cfg AgentConfig) TLSCertificate() (tls.Certificate, error) {
 	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
 		return tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 	}
-	return SelfSignedCert()
+	if cfg.DataDir == "" {
+		return SelfSignedCert()
+	}
+	certPath := filepath.Join(cfg.DataDir, persistedCertName)
+	keyPath := filepath.Join(cfg.DataDir, persistedKeyName)
+	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+		return cert, nil
+	}
+	certPEM, keyPEM, err := selfSignedPEM()
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	if err := writePersistedCert(cfg.DataDir, certPath, keyPath, certPEM, keyPEM); err != nil {
+		log.Printf("warning: cannot persist self-signed TLS cert in %s (%v); using an ephemeral cert, the panel's pinned fingerprint will mismatch after restart", cfg.DataDir, err)
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+func writePersistedCert(dir, certPath, keyPath string, certPEM, keyPEM []byte) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		_ = os.Remove(keyPath)
+		return err
+	}
+	return nil
 }
 
 // SelfSignedCert generates an ephemeral self-signed ECDSA certificate valid for
 // localhost and the wildcard, usable entirely from memory.
 func SelfSignedCert() (tls.Certificate, error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, keyPEM, err := selfSignedPEM()
 	if err != nil {
 		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+func selfSignedPEM() (certPEM, keyPEM []byte, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 
 	tmpl := x509.Certificate{
@@ -130,15 +177,15 @@ func SelfSignedCert() (tls.Certificate, error) {
 
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return tls.X509KeyPair(certPEM, keyPEM)
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
 }
