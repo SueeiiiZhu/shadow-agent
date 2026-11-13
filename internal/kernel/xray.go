@@ -447,12 +447,71 @@ func buildXrayOutbound(spec OutboundSpec, dialerProxyTag string) map[string]any 
 		ob["protocol"] = "freedom"
 	}
 
+	var ss map[string]any
+	if spec.Stream != nil {
+		ss = buildXrayOutboundStream(spec.Stream)
+	}
 	if dialerProxyTag != "" {
-		ob["streamSettings"] = map[string]any{
-			"sockopt": map[string]any{"dialerProxy": dialerProxyTag},
+		if ss == nil {
+			ss = map[string]any{}
 		}
+		ss["sockopt"] = map[string]any{"dialerProxy": dialerProxyTag}
+	}
+	if ss != nil {
+		ob["streamSettings"] = ss
 	}
 	return ob
+}
+
+// buildXrayOutboundStream renders the client-side streamSettings used to dial
+// another node's inbound.
+func buildXrayOutboundStream(s *OutboundStream) map[string]any {
+	network := s.Network
+	if network == "" {
+		network = "tcp"
+	}
+	ss := map[string]any{"network": network}
+	switch s.Security {
+	case "tls":
+		ss["security"] = "tls"
+		tls := map[string]any{"allowInsecure": s.AllowInsecure}
+		if s.SNI != "" {
+			tls["serverName"] = s.SNI
+		}
+		if len(s.ALPN) > 0 {
+			tls["alpn"] = s.ALPN
+		}
+		if s.Fingerprint != "" {
+			tls["fingerprint"] = s.Fingerprint
+		}
+		ss["tlsSettings"] = tls
+	case "reality":
+		ss["security"] = "reality"
+		r := map[string]any{
+			"serverName":  s.SNI,
+			"fingerprint": firstNonEmpty(s.Fingerprint, "chrome"),
+			"publicKey":   s.PublicKey,
+			"shortId":     s.ShortID,
+		}
+		ss["realitySettings"] = r
+	default:
+		ss["security"] = "none"
+	}
+	switch network {
+	case "ws":
+		ws := map[string]any{"path": firstNonEmpty(s.Path, "/")}
+		if s.Host != "" {
+			ws["headers"] = map[string]any{"Host": s.Host}
+		}
+		ss["wsSettings"] = ws
+	case "grpc":
+		grpc := map[string]any{"serviceName": firstNonEmpty(strings.TrimPrefix(s.Path, "/"), "gun")}
+		if s.Host != "" {
+			grpc["authority"] = s.Host
+		}
+		ss["grpcSettings"] = grpc
+	}
+	return ss
 }
 
 func firstNonEmpty(vals ...string) string {

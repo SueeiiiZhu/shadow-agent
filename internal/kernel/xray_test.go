@@ -275,3 +275,53 @@ func TestXrayGRPCServiceNameFromSpec(t *testing.T) {
 		t.Error("default serviceName must be gun")
 	}
 }
+
+// A dialer hop that is another panel node: vless over REALITY/TLS/ws, with the
+// upstream dialed through it.
+func TestXrayNodeHopStream(t *testing.T) {
+	spec := &NodeSpec{
+		Tag: "a", Kernel: "xray", Protocol: "vless", Port: 2053,
+		Outbound: &OutboundSpec{Protocol: "socks", Address: "up.example.com", Port: 5001, User: "u", Pass: "p"},
+		Dialer: []OutboundSpec{{
+			Protocol: "vless", Address: "b.example.com", Port: 443, UUID: "uuid-b",
+			Stream: &OutboundStream{Network: "tcp", Security: "reality", SNI: "www.microsoft.com", PublicKey: "PUB", ShortID: "ab"},
+		}, {
+			Protocol: "trojan", Address: "c.example.com", Port: 8443, Pass: "pw",
+			Stream: &OutboundStream{Network: "ws", Security: "tls", SNI: "c.example.com", Path: "/w", Host: "c.example.com"},
+		}},
+	}
+	obs, mainTag, err := buildXrayOutbounds(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := findOutbound(t, obs, mainTag)
+	if dialerProxyOf(t, main) != "dialer-1" {
+		t.Fatalf("upstream must dial via hop1, got %q", dialerProxyOf(t, main))
+	}
+	hop1 := findOutbound(t, obs, "dialer-1")
+	ss := hop1["streamSettings"].(map[string]any)
+	if ss["security"] != "reality" {
+		t.Fatalf("hop1 security = %v", ss["security"])
+	}
+	r := ss["realitySettings"].(map[string]any)
+	if r["publicKey"] != "PUB" || r["shortId"] != "ab" || r["serverName"] != "www.microsoft.com" || r["fingerprint"] != "chrome" {
+		t.Fatalf("reality settings = %v", r)
+	}
+	if dialerProxyOf(t, hop1) != "dialer-2" {
+		t.Fatalf("hop1 must dial via hop2, got %q", dialerProxyOf(t, hop1))
+	}
+	hop2 := findOutbound(t, obs, "dialer-2")
+	ss2 := hop2["streamSettings"].(map[string]any)
+	if ss2["network"] != "ws" || ss2["security"] != "tls" {
+		t.Fatalf("hop2 stream = %v", ss2)
+	}
+	if ss2["wsSettings"].(map[string]any)["path"] != "/w" {
+		t.Fatalf("hop2 ws = %v", ss2["wsSettings"])
+	}
+	if dialerProxyOf(t, hop2) != "" {
+		t.Fatalf("last hop must dial directly")
+	}
+	if _, err := json.Marshal(obs); err != nil {
+		t.Fatal(err)
+	}
+}

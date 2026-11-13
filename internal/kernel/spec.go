@@ -61,6 +61,25 @@ type OutboundSpec struct {
 	Security       string `json:"security"`
 	Tag            string `json:"tag"`
 	DialerProxyTag string `json:"dialerProxyTag"`
+	// Stream is the transport/security layer used to reach this outbound. It is
+	// needed when the hop is another panel node (vless/vmess/trojan over TLS,
+	// REALITY, ws or grpc); socks/http upstreams leave it nil.
+	Stream *OutboundStream `json:"stream,omitempty"`
+}
+
+// OutboundStream is the client side of a StreamSpec: what is needed to dial a
+// remote inbound (REALITY carries the public key, not the private one).
+type OutboundStream struct {
+	Network       string   `json:"network"`  // tcp|ws|grpc
+	Security      string   `json:"security"` // none|tls|reality
+	SNI           string   `json:"sni"`
+	ALPN          []string `json:"alpn"`
+	AllowInsecure bool     `json:"allowInsecure"`
+	Fingerprint   string   `json:"fingerprint"`
+	PublicKey     string   `json:"publicKey"`
+	ShortID       string   `json:"shortId"`
+	Path          string   `json:"path"` // ws path / grpc serviceName
+	Host          string   `json:"host"` // ws Host header / grpc authority
 }
 
 // NodeSpec is the full provisioning request for a single node/inbound.
